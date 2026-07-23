@@ -41,3 +41,6 @@ diarize_x86_64_mod_unsigned
 .python-version
 /pyinstaller/win_installer
 /.history-memo
+
+# Felix section
+.venv
