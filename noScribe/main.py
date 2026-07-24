@@ -2626,6 +2626,7 @@ class App(ctk.CTk):
                     speaker = ''
                     prev_speaker = ''
                     last_auto_save = datetime.datetime.now()
+                    segments_data = []  # collected word-level data for the JSON sidecar
 
                     def save_doc():
                         nonlocal last_auto_save
@@ -2838,6 +2839,28 @@ class App(ctk.CTk):
                         a = d.createElementFromHTML(a_html)
                         p.appendChild(a)
 
+                        # Collect structured data (per-word timings + speaker) for the JSON sidecar.
+                        # Whisper's word timings are in seconds relative to the (possibly trimmed)
+                        # audio, so we convert to milliseconds and add job.start to match the
+                        # original recording's timeline.
+                        word_list = []
+                        for w in (segment.words or []):
+                            w_start = w.get('start')
+                            w_end = w.get('end')
+                            word_list.append({
+                                "word": (w.get('word') or '').strip(),
+                                "start_ms": job.start + round(w_start * 1000) if w_start is not None else None,
+                                "end_ms": job.start + round(w_end * 1000) if w_end is not None else None,
+                                "probability": w.get('prob'),
+                            })
+                        segments_data.append({
+                            "start_ms": orig_audio_start,
+                            "end_ms": orig_audio_end,
+                            "speaker": speaker,
+                            "text": (segment.text or '').strip(),
+                            "words": word_list,
+                        })
+
                         self.log(seg_text)
                         
                         first_segment = False
@@ -2866,6 +2889,26 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn()
                         self.logn(t('transcription_finished'), 'highlight')
+
+                        # Write the machine-readable data file (JSON) next to the transcript.
+                        # This keeps the word-level timings + speakers that the normal
+                        # html/txt/vtt output throws away.
+                        try:
+                            json_path = Path(job.transcript_file).with_suffix('.json')
+                            with open(json_path, 'w', encoding='utf-8') as jf:
+                                json.dump({
+                                    "schema_version": "0.1",
+                                    "source": {
+                                        "audio_file": str(job.audio_file),
+                                        "language": job.language_name,
+                                        "speaker_detection": str(job.speaker_detection),
+                                        "noScribe_version": app_version,
+                                    },
+                                    "segments": segments_data,
+                                }, jf, ensure_ascii=False, indent=2)
+                            self.logn(t('transcription_saved', file=json_path), link=f'file://{json_path}')
+                        except Exception as json_err:
+                            self.logn(f'Could not write JSON data file: {json_err}', where='file')
                     except Exception as err:
                         if self._handle_cuda_fallback('whisper', err):
                             retry_cuda = True
