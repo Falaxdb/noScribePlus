@@ -35,7 +35,7 @@ import webbrowser
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from subprocess import Popen, run
+from subprocess import PIPE, STDOUT, Popen, run
 from tempfile import TemporaryDirectory
 from threading import Thread
 from typing import Optional
@@ -253,6 +253,15 @@ OUTPUT_FILETYPES = {
     'html': 'noScribe Transcript',
     'txt': 'Text only',
     'vtt': 'WebVTT Subtitles (also for EXMARaLDA)',
+}
+
+# Analyzers the "Enrich" feature (TranscriptEnrich's `enrich analyze` CLI) can run.
+# 'demo' is intentionally excluded here - it's a trivial no-input analyzer with no
+# research value, kept only as a comment so this dict is easy to extend.
+ENRICH_ANALYZERS = {
+    'pauses': {'label_key': 'enrich_analyzer_pauses', 'needs_audio': False},
+    'emotion_dimensional': {'label_key': 'enrich_analyzer_emotion_dimensional', 'needs_audio': True, 'license_note': True},
+    'emotion_categorical': {'label_key': 'enrich_analyzer_emotion_categorical', 'needs_audio': True},
 }
 
 def save_config():
@@ -928,6 +937,7 @@ def _init_app_state(app):
     app._mp_proc = None
     app._mp_queue = None
     app._ffmpeg_proc = None
+    app._enrich_proc = None
     app._shutting_down = False
 
     # Get a list of available Whisper models.
@@ -1262,6 +1272,14 @@ class App(ctk.CTk):
             command=lambda: self.launch_editor()
         )
         self.log_edit_btn.pack(side='right', padx=(0, 0), pady=0)
+        self.log_enrich_btn = ctk.CTkButton(
+            self.log_progress_frame,
+            text=t('enrich_button'),
+            width=100,
+            fg_color=self.log_textbox._scrollbar_button_color,
+            command=lambda: self.launch_enrich()
+        )
+        self.log_enrich_btn.pack(side='right', padx=(0, 5), pady=0)
         self.log_stop_btn = ctk.CTkButton(
             self.log_progress_frame,
             text=t('stop_button'),
@@ -1300,6 +1318,15 @@ class App(ctk.CTk):
             command=lambda: self.launch_editor()
         )
         self.queue_edit_btn.pack(side='right', padx=(0, 5), pady=5)
+
+        self.queue_enrich_btn = ctk.CTkButton(
+            self.queue_controls_frame,
+            text=t('enrich_button'),
+            width=100,
+            fg_color=self.log_textbox._scrollbar_button_color,
+            command=lambda: self.launch_enrich()
+        )
+        self.queue_enrich_btn.pack(side='right', padx=(0, 5), pady=5)
 
         self.queue_stop_btn = ctk.CTkButton(
             self.queue_controls_frame,
@@ -1904,10 +1931,182 @@ class App(ctk.CTk):
         else:
             self.logn(t('err_noScribeEdit_not_found'), 'error')
 
+    def _get_enrich_cli_path(self, prompt_if_missing=True) -> Optional[Path]:
+        """ Locate the `enrich` CLI from the sibling TranscriptEnrich project.
+        Cached in config['enrich_cli_path']; re-detects if that path stops existing. """
+        cached = get_config('enrich_cli_path', '')
+        if cached and os.path.exists(cached):
+            return Path(cached)
+
+        if not hasattr(sys, "_MEIPASS"):
+            bin_dir = 'Scripts' if platform.system() == 'Windows' else 'bin'
+            exe_name = 'enrich.exe' if platform.system() == 'Windows' else 'enrich'
+            candidate = Path(__file__).resolve().parents[2] / 'TranscriptEnrich' / '.venv' / bin_dir / exe_name
+            if candidate.exists():
+                config['enrich_cli_path'] = str(candidate)
+                save_config()
+                return candidate
+
+        if not prompt_if_missing:
+            return None
+
+        if not tk.messagebox.askyesno(title='noScribe', message=t('ask_enrich_cli_locate')):
+            return None
+        fn = tk.filedialog.askopenfilename(title=t('select_enrich_cli'))
+        if fn and os.path.exists(fn):
+            config['enrich_cli_path'] = fn
+            save_config()
+            return Path(fn)
+        return None
+
+    def ask_enrich_options(self, job: 'TranscriptionJob', json_path: Path):
+        """ Dialog to pick which analyzers to run, the output path, and verbosity
+        for an Enrich run. Returns a dict, or None if cancelled. """
+        dlg = ctk.CTkToplevel(self)
+        dlg.title('noScribe')
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        chosen = {}
+
+        has_audio = bool(job.audio_file) and os.path.exists(job.audio_file)
+
+        ctk.CTkLabel(dlg, text=t('enrich_dialog_select_analyzers'), wraplength=400,
+                     justify='left').pack(padx=20, pady=(20, 10), anchor='w')
+
+        analyzer_vars = {}
+        for key, meta in ENRICH_ANALYZERS.items():
+            needs_audio = meta.get('needs_audio', False)
+            enabled = not needs_audio or has_audio
+            var = ctk.BooleanVar(value=enabled)
+            analyzer_vars[key] = var
+            cb = ctk.CTkCheckBox(dlg, text=t(meta['label_key']), variable=var,
+                                  state=ctk.NORMAL if enabled else ctk.DISABLED)
+            cb.pack(padx=20, pady=(5, 0), anchor='w')
+            if needs_audio and not has_audio:
+                ctk.CTkLabel(dlg, text=t('enrich_dialog_no_audio_note'),
+                             text_color='gray60', font=('', 11)).pack(padx=40, pady=(0, 0), anchor='w')
+            elif meta.get('license_note'):
+                ctk.CTkLabel(dlg, text=t('enrich_dialog_license_note'),
+                             text_color='gray60', font=('', 11)).pack(padx=40, pady=(0, 0), anchor='w')
+
+        ctk.CTkLabel(dlg, text=t('enrich_dialog_output_label')).pack(padx=20, pady=(15, 0), anchor='w')
+        output_frame = ctk.CTkFrame(dlg, fg_color='transparent')
+        output_frame.pack(padx=20, pady=(0, 10), fill='x')
+        default_output = json_path.with_name(f'{json_path.stem}_enriched.json')
+        output_var = ctk.StringVar(value=str(default_output))
+        output_entry = ctk.CTkEntry(output_frame, width=320, textvariable=output_var)
+        output_entry.pack(side='left')
+
+        def _browse_output():
+            fn = tk.filedialog.asksaveasfilename(
+                initialdir=str(default_output.parent), initialfile=default_output.name,
+                filetypes=[('JSON', '*.json')], defaultextension='.json'
+            )
+            if fn:
+                output_var.set(fn)
+
+        ctk.CTkButton(output_frame, text='...', width=30, command=_browse_output).pack(side='left', padx=(5, 0))
+
+        verbose_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(dlg, text=t('enrich_dialog_verbose'), variable=verbose_var).pack(padx=20, pady=(5, 20), anchor='w')
+
+        def _confirm(event=None):
+            enabled_keys = [key for key, var in analyzer_vars.items() if var.get()]
+            if not enabled_keys:
+                tk.messagebox.showerror(title='noScribe', message=t('err_enrich_no_analyzers'))
+                return
+            output_path = output_var.get().strip()
+            if not output_path:
+                output_path = str(default_output)
+            chosen['enable'] = enabled_keys
+            chosen['output'] = Path(output_path)
+            chosen['verbose'] = verbose_var.get()
+            dlg.destroy()
+
+        ctk.CTkButton(dlg, width=100, text=t('enrich_dialog_ok'), command=_confirm).pack(padx=20, pady=(0, 20))
+        dlg.bind('<Return>', _confirm)
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + max((self.winfo_width() - dlg.winfo_width()) // 2, 0)
+        y = self.winfo_rooty() + max((self.winfo_height() - dlg.winfo_height()) // 3, 0)
+        dlg.geometry(f'+{x}+{y}')
+        dlg.grab_set()
+        dlg.focus()
+        self.wait_window(dlg)
+        return chosen if chosen else None
+
+    def launch_enrich(self):
+        if getattr(self, '_enrich_proc', None) is not None and self._enrich_proc.poll() is None:
+            tk.messagebox.showinfo(title='noScribe', message=t('err_enrich_already_running'))
+            return
+
+        jobs = self.queue.get_finished_jobs()
+        if not jobs:
+            tk.messagebox.showerror(title='noScribe', message=t('err_enrich_no_job'))
+            return
+        job = jobs[-1]
+
+        json_path = Path(job.transcript_file).with_suffix('.json') if job.transcript_file else None
+        if not json_path or not json_path.exists():
+            tk.messagebox.showerror(title='noScribe', message=t('err_enrich_no_json'))
+            return
+
+        enrich_path = self._get_enrich_cli_path()
+        if enrich_path is None:
+            self.logn(t('err_enrich_cli_not_found'), 'error')
+            return
+
+        opts = self.ask_enrich_options(job, json_path)
+        if opts is None:
+            return
+
+        popenargs = [str(enrich_path), 'analyze', str(json_path), '-o', str(opts['output'])]
+        audio_path = Path(job.audio_file) if job.audio_file else None
+        if audio_path and audio_path.exists():
+            popenargs += ['--audio', str(audio_path)]
+        if set(opts['enable']) != set(ENRICH_ANALYZERS.keys()):
+            for name in opts['enable']:
+                popenargs += ['--enable', name]
+        if opts['verbose']:
+            popenargs.append('--verbose')
+
+        buttons = [self.log_enrich_btn, self.queue_enrich_btn]
+        for b in buttons:
+            b.configure(state=ctk.DISABLED)
+
+        def _worker():
+            try:
+                self.logn()
+                self.logn(t('enrich_started', file=json_path.name), 'highlight')
+                proc = Popen(popenargs, stdout=PIPE, stderr=STDOUT, text=True, bufsize=1)
+                self._enrich_proc = proc
+                for line in proc.stdout:
+                    self.logn(line.rstrip())
+                proc.stdout.close()
+                ret = proc.wait()
+                if ret == 0:
+                    self.logn(t('enrich_finished', file=str(opts['output'])), 'highlight', link=f'file://{opts["output"]}')
+                else:
+                    self.logn(t('err_enrich_failed', code=ret), 'error')
+            except Exception as e:
+                self.logn(t('err_enrich_exception', error=str(e)), 'error')
+            finally:
+                self._enrich_proc = None
+                for b in buttons:
+                    try:
+                        b.configure(state=ctk.NORMAL)
+                    except Exception:
+                        pass
+
+        wkr = Thread(target=_worker, daemon=True)
+        self._worker_threads.append(wkr)
+        wkr.start()
+
     def openLink(self, link: str) -> None:
         if link.startswith('file://') and link.endswith('.html'):
             self.launch_editor(link[7:])
-        else: 
+        else:
             webbrowser.open(link)
     
     def log(self, txt: str = '', tags: list = [], where: str = 'both', link: str = '', tb: str = '') -> None:
@@ -3297,6 +3496,20 @@ class App(ctk.CTk):
             finally:
                 self._ffmpeg_proc = None
 
+            # Terminate Enrich CLI subprocess if currently running
+            if getattr(self, "_enrich_proc", None) is not None:
+                try:
+                    if self._enrich_proc.poll() is None:
+                        self._enrich_proc.terminate()
+                        self._enrich_proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        self._enrich_proc.kill()
+                    except Exception:
+                        pass
+                finally:
+                    self._enrich_proc = None
+
             # Join worker threads briefly to give them a chance to exit
             try:
                 for th in list(getattr(self, "_worker_threads", [])):
@@ -3382,6 +3595,20 @@ def _cleanup_app(app):
                     pass
             finally:
                 app._ffmpeg_proc = None
+
+        # Terminate Enrich CLI subprocess if currently running
+        if getattr(app, "_enrich_proc", None) is not None:
+            try:
+                if app._enrich_proc.poll() is None:
+                    app._enrich_proc.terminate()
+                    app._enrich_proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    app._enrich_proc.kill()
+                except Exception:
+                    pass
+            finally:
+                app._enrich_proc = None
 
         # Join worker threads briefly
         for th in list(getattr(app, "_worker_threads", [])):

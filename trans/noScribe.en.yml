@@ -53,6 +53,7 @@ en:
   stop_button: Cancel
   queue_run_button: 'Run'
   editor_button: Editor
+  enrich_button: Enrich
 
   overall_progress: 'Overall progress: '
 
@@ -146,6 +147,26 @@ en:
   err_vtt_invalid_options: 'Warning: The options "overlapping speech", "Mark pause" and "Timestamps" are not supported in VTT files.'
   err_editor_invalid_format: 'The editor can only be used with html files. Do you want to start it anyway?'
   err_editor_no_file: 'No finished transcription job available. Start the editor anyway?'
+  enrich_started: 'Running Enrich on: %{file}'
+  enrich_finished: 'Enrich finished. Saved to: %{file}'
+  err_enrich_failed: 'Enrich exited with an error (code %{code}). See log above.'
+  err_enrich_exception: 'Could not run Enrich: %{error}'
+  err_enrich_no_job: 'No finished transcription job available to enrich.'
+  err_enrich_no_json: 'No transcript data file (.json) was found for this job. It may not have been created; try re-running the transcription.'
+  err_enrich_cli_not_found: 'Error: Could not find the Enrich command-line tool.'
+  err_enrich_already_running: 'Enrich is already running. Please wait for it to finish.'
+  err_enrich_no_analyzers: 'Select at least one analyzer to run.'
+  ask_enrich_cli_locate: 'Could not automatically find the Enrich tool. Would you like to locate it manually?'
+  select_enrich_cli: 'Select the Enrich program'
+  enrich_dialog_select_analyzers: 'Select which analyzers to run:'
+  enrich_dialog_output_label: 'Save enriched file to:'
+  enrich_dialog_verbose: 'Show detailed progress'
+  enrich_dialog_no_audio_note: '(needs audio - not available for this job)'
+  enrich_dialog_license_note: 'Uses a non-commercial licensed model (CC BY-NC-SA 4.0).'
+  enrich_dialog_ok: Run
+  enrich_analyzer_pauses: 'Micro-pauses'
+  enrich_analyzer_emotion_dimensional: 'Emotion (dimensional, needs audio)'
+  enrich_analyzer_emotion_categorical: 'Emotion (categorical, needs audio)'
   err_invalid_model: 'Ignored double name for whisper model: "%{model_name}"'
   err_partial_not_found: 'Partial transcript file not found.'
   log_open_partial: 'Opening partial transcript: %{file}'
