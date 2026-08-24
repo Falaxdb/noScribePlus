@@ -27,6 +27,7 @@ import os
 import platform
 import queue as pyqueue
 import re
+import shutil
 import sys
 import tkinter as tk
 import traceback
@@ -3089,6 +3090,21 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn(t('transcription_finished'), 'highlight')
 
+                        # Keep the decoded audio next to the transcript. tmp_audio_file is
+                        # the exact signal Whisper timed against, and being uncompressed PCM
+                        # it seeks to the sample. A compressed source often does not: a VBR
+                        # mp3 carrying only a Xing header has no accurate seek index, so
+                        # asking a player for t=2100s can land seconds away, and anything
+                        # driven by the word timings below then highlights the wrong word.
+                        # Copied here because tmpdir is discarded when the job ends.
+                        audio_path = Path(job.transcript_file).with_suffix('.wav')
+                        try:
+                            shutil.copyfile(tmp_audio_file, audio_path)
+                            self.logn(t('transcription_saved', file=audio_path), link=f'file://{audio_path}')
+                        except Exception as wav_err:
+                            audio_path = None
+                            self.logn(f'Could not write audio file: {wav_err}', where='file')
+
                         # Write the machine-readable data file (JSON) next to the transcript.
                         # This keeps the word-level timings + speakers that the normal
                         # html/txt/vtt output throws away.
@@ -3102,6 +3118,16 @@ class App(ctk.CTk):
                                         "language": job.language_name,
                                         "speaker_detection": str(job.speaker_detection),
                                         "noScribe_version": app_version,
+                                        # Just the name: this file sits next to the JSON, so
+                                        # the pair survives being moved or handed to someone
+                                        # else, which an absolute path would not.
+                                        "playback_audio_file": audio_path.name if audio_path else None,
+                                        "playback_audio_sample_rate": 16000,
+                                        # The timings below are on the original recording's
+                                        # timeline, but the wav begins at the trim point, so a
+                                        # player using playback_audio_file must subtract this.
+                                        # Zero unless a start time was set.
+                                        "playback_audio_offset_ms": job.start,
                                     },
                                     "segments": segments_data,
                                 }, jf, ensure_ascii=False, indent=2)
