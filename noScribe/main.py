@@ -3091,13 +3091,18 @@ class App(ctk.CTk):
                         self.logn(t('transcription_finished'), 'highlight')
 
                         # Keep the decoded audio next to the transcript. tmp_audio_file is
-                        # the exact signal Whisper timed against, and being uncompressed PCM
-                        # it seeks to the sample. A compressed source often does not: a VBR
-                        # mp3 carrying only a Xing header has no accurate seek index, so
-                        # asking a player for t=2100s can land seconds away, and anything
-                        # driven by the word timings below then highlights the wrong word.
-                        # Copied here because tmpdir is discarded when the job ends.
-                        audio_path = Path(job.transcript_file).with_suffix('.wav')
+                        # the exact signal Whisper timed against, so it is the ground truth
+                        # for every timestamp below - hence "_noscribe_reference": it is not
+                        # the recording the user picked, it is 16kHz mono and is meant for
+                        # checking timings, not for listening. Being uncompressed PCM it also
+                        # seeks to the sample, which a compressed source often does not: a VBR
+                        # mp3 carrying only a Xing header has no accurate seek index, so asking
+                        # a player for t=2100s can land seconds away. Copied here because
+                        # tmpdir is discarded when the job ends.
+                        transcript_path = Path(job.transcript_file)
+                        audio_path = transcript_path.with_name(
+                            f'{transcript_path.stem}_noscribe_reference.wav'
+                        )
                         try:
                             shutil.copyfile(tmp_audio_file, audio_path)
                             self.logn(t('transcription_saved', file=audio_path), link=f'file://{audio_path}')
@@ -3118,16 +3123,17 @@ class App(ctk.CTk):
                                         "language": job.language_name,
                                         "speaker_detection": str(job.speaker_detection),
                                         "noScribe_version": app_version,
-                                        # Just the name: this file sits next to the JSON, so
-                                        # the pair survives being moved or handed to someone
-                                        # else, which an absolute path would not.
-                                        "playback_audio_file": audio_path.name if audio_path else None,
-                                        "playback_audio_sample_rate": 16000,
+                                        # The signal the timings below were measured against.
+                                        # Just the name: it sits next to the JSON, so the pair
+                                        # survives being moved or handed to someone else, which
+                                        # an absolute path would not.
+                                        "reference_audio_file": audio_path.name if audio_path else None,
+                                        "reference_audio_sample_rate": 16000,
                                         # The timings below are on the original recording's
-                                        # timeline, but the wav begins at the trim point, so a
-                                        # player using playback_audio_file must subtract this.
+                                        # timeline, but the reference wav begins at the trim
+                                        # point, so anything seeking it must subtract this.
                                         # Zero unless a start time was set.
-                                        "playback_audio_offset_ms": job.start,
+                                        "reference_audio_offset_ms": job.start,
                                     },
                                     "segments": segments_data,
                                 }, jf, ensure_ascii=False, indent=2)
